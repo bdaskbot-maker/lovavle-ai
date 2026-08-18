@@ -1,0 +1,8 @@
+node_modules
+.vscode
+.git
+.env
+.DS_Store
+platform/dist
+**/dist/**
+**/build/**

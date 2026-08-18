@@ -1,0 +1,467 @@
+---
+title: Components
+description: Components are the building blocks of your app.
+---
+
+import VideoAside from "../../../components/VideoAside.astro";
+
+Every SST app is made up of components. These are logical units that represent features in your app; like your frontends, APIs, databases, or queues.
+
+There are two types of components in SST:
+
+1. Built-in components — High level components built by the SST team
+2. Provider components — Low level components from the providers
+
+Let's look at them below.
+
+---
+
+## Background
+
+Most [providers](/docs/providers/) like AWS are made up of low level resources. And it takes quite a number of these to put together something like a frontend or an API. For example, it takes around 70 low level AWS resources to create a Next.js app on AWS.
+
+As a result, Infrastructure as Code has been traditionally only been used by DevOps or Platform engineers.
+
+To fix this, SST has components that can help you with the most common features in your app.
+
+---
+
+## Built-in
+
+The built-in components in SST, the ones you see in the sidebar, are designed to make it really easy to create the various parts of your app.
+
+For example, you don't need to know a lot of AWS details to deploy your Next.js frontend:
+
+```ts title="sst.config.ts"
+new sst.aws.Nextjs("MyWeb");
+```
+
+And because this is all in code, it's straightforward to configure this further.
+
+```ts title="sst.config.ts"
+new sst.aws.Nextjs("MyWeb", {
+  domain: "my-app.com",
+  path: "packages/web",
+  imageOptimization: {
+    memory: "512 MB"
+  },
+  buildCommand: "npm run build"
+});
+```
+
+You can even take this a step further and completely transform how the low level resources are created. We'll look at this below.
+
+:::tip
+Aside from the built-in SST components, all the [Pulumi/Terraform providers](/docs/all-providers#directory) are supported as well.
+:::
+
+Currently SST has built-in components for two cloud providers.
+
+---
+
+### AWS
+
+The AWS built-in components are designed to make it easy to work with AWS. 
+
+:::tip
+SST's built-in components make it easy to build apps with AWS.
+:::
+
+These components are namespaced under **`sst.aws.*`** and listed under AWS in the sidebar. Internally they use Pulumi's [AWS](https://www.pulumi.com/registry/packages/aws/) provider.
+
+---
+
+### Cloudflare
+
+These components are namespaced under **`sst.cloudflare.*`** and listed under Cloudflare in the sidebar. Internally they use Pulumi's [Cloudflare](https://www.pulumi.com/registry/packages/cloudflare/) provider.
+
+---
+
+## Constructor
+
+To add a component to your app, you create an instance of it by passing in a couple of args. For example, here's the signature of the [Function](/docs/component/aws/function) component.
+
+```ts
+new sst.aws.Function(name: string, args: FunctionArgs, opts?: pulumi.ComponentResourceOptions)
+```
+
+Each component takes the following:
+
+- `name`: The name of the component. This needs to be unique across your entire app.
+- `args`: An object of properties that allows you to configure the component.
+- `opts?`: An optional object of properties that allows you to configure this component in Pulumi.
+
+Here's an example of creating a `Function` component:
+
+```ts title="sst.config.ts"
+const function = new sst.aws.Function("MyFunction", {
+  handler: "src/lambda.handler"
+});
+```
+
+---
+
+### Name
+
+There are two guidelines to follow when naming your components:
+
+1. The names of SST's built-in components and components extended with [`Linkable.wrap`](/docs/component/linkable/#static-wrap) need to be global across your entire app.
+
+   This allows [Resource Linking](linking) to look these resources up at runtime.
+
+2. Optionally, use PascalCase for the component name.
+
+   For example, you might name your bucket, `MyBucket` and use Resource Linking to look it up with `Resource.MyBucket`.
+
+   However this is purely cosmetic. You can use kebab case. So `my-bucket`, and look it up using `Resource['my-bucket']`.
+
+---
+
+### Args
+
+Each component takes a set of args that allow you to configure it. These args are specific to each component. For example, the Function component takes [`FunctionArgs`](/docs/component/aws/function#functionargs).
+
+Most of these args are optional, meaning that most components need very little configuration to get started. Typically, the most common configuration options are lifted to the top-level. To further configure the component, you'll need to use the `transform` prop.
+
+Args usually take primitive types. However, they also take a special version of a primitive type. It'll look something like _`Input<string>`_. We'll look at this in detail below.
+
+---
+
+## Transform
+
+Most components take a `transform` prop as a part of their constructor or methods. It's an object that takes callbacks that allow you to transform how that component's infrastructure is created.
+
+:::tip
+You can completely configure a component using the `transform` prop.
+:::
+
+For example, here's what the `transform` prop looks like for the [Function](/docs/component/aws/function#transform) component:
+
+- `function`: A callback to transform the underlying Lambda function
+- `logGroup`: A callback to transform the Lambda's LogGroup resource
+- `role`: A callback to transform the role that the Lambda function assumes
+
+The type for these callbacks is similar. Here's what the `role` callback looks like:
+
+```ts
+RoleArgs | (args: RoleArgs, opts: pulumi.ComponentResourceOptions, name: string) => void
+```
+
+This takes either:
+
+- A `RoleArgs` object. For example:
+
+  ```ts
+  {
+    transform: {
+      role: {
+        name: "MyRole"
+      }
+    }
+  }
+  ```
+
+  This is **merged** with the original `RoleArgs` that were going to be passed to the component.
+
+- A function that takes `RoleArgs`. Here's the function signature:
+
+  ```ts
+  (args: RoleArgs, opts: pulumi.ComponentResourceOptions, name: string) => void
+  ```
+
+  Where [`args`, `opts`, and `name`](https://www.pulumi.com/registry/packages/aws/api-docs/iam/role/#constructor-syntax) are the arguments for the Role constructor passed to Pulumi.
+
+  So you can pass in a callback that takes the current `RoleArgs` and mutates it.
+
+  ```ts
+  {
+    transform: {
+      role: (args, opts) => {
+        args.name = `${args.name}-MyRole`;
+        opts.retainOnDelete = true;
+      }
+    }
+  }
+  ```
+
+---
+
+### `$transform`
+
+Similar to the component transform, we have the global `$transform`. This allows you to transform how a component of a given type is created.
+
+:::tip
+Set default props across all your components with `$transform`.
+:::
+
+For example, set a default `runtime` for your functions.
+
+```ts title="sst.config.ts"
+$transform(sst.aws.Function, (args, opts) => {
+  // Set the default if it's not set by the component
+  args.runtime ??= "nodejs18.x";
+});
+```
+
+This sets the runtime for any `Function` component that'll be **created after this call**.
+
+The reason we do the check for `args.runtime` is to allow components to override the default. We do this by only setting the default if the component isn't specifying its own `runtime`.
+
+```ts title="sst.config.ts"
+new sst.aws.Function("MyFunctionA", {
+  handler: "src/lambdaA.handler"
+});
+
+new sst.aws.Function("MyFunctionB", {
+  handler: "src/lambdaB.handler",
+  runtime: "nodejs20.x"
+});
+```
+
+So given the above transform, `MyFunctionA` will have a runtime of `nodejs18.x` and `MyFunctionB` will have a runtime of `nodejs20.x`.
+
+:::note
+The `$transform` is only applied to components that are defined after it.
+:::
+
+The `args` and `opts` in the `$transform` callback are what you'd pass to the `Function` component. Recall the signature of the `Function` component:
+
+```ts title="sst.config.ts"
+new sst.aws.Function(name: string, args: FunctionArgs, opts?: pulumi.ComponentResourceOptions)
+```
+
+Read more about the global [`$transform`](/docs/reference/global/#transform).
+
+---
+
+## Properties
+
+An instance of a component exposes a set of properties. For example, the `Function` component exposes the following [properties](/docs/component/aws/function#properties) — `arn`, `name`, `url`, and `nodes`.
+
+```ts
+const functionArn = function.arn;
+```
+
+These can be used to output info about your app or can be used as args for other components.
+
+These are typically primitive types. However, they can also be a special version of a primitive type. It'll look something like _`Output<string>`_. We'll look at this in detail below.
+
+---
+
+### Links
+
+Some of these properties are also made available via [resource linking](/docs/linking/). This allows you to access them in your functions and frontends in a typesafe way.
+
+For example, a Function exposes its `name` through its [links](/docs/component/aws/bucket/#links).
+
+---
+
+### Nodes
+
+The `nodes` property that a component exposes gives you access to the underlying infrastructure. This is an object that contains references to the underlying Pulumi components that are created.
+
+:::tip
+The nodes that are made available reflect the ones that can be configured using the `transform` prop.
+:::
+
+For example, the `Function` component exposes the following [nodes](/docs/component/aws/function#nodes) — `function`, `logGroup`, and `role`.
+
+---
+
+## Outputs
+
+The properties of a component are typically of a special type that looks something like, _`Output<primitive>`_.
+
+<VideoAside title="Watch a video on how inputs and outputs work" href="https://youtu.be/zQTtZS4dIbQ" />
+
+These are values that are not available yet and will be resolved as the deploy progresses. However, these outputs can be used as args in other components.
+
+This makes it so that parts of your app are not blocked and all your resources are deployed as concurrently as possible.
+
+For example, let's create a function with an url.
+
+```ts title="sst.config.ts"
+const myFunction = new sst.aws.Function("MyFunction", {
+  url: true,
+  handler: "src/lambda.handler"
+});
+```
+
+Here, `myFunction.url` is of type `Output<string>`. We want to use this function url as a route in our router.
+
+```ts {3} title="sst.config.ts"
+new sst.aws.Router("MyRouter", {
+  routes: {
+    "/api": myFunction.url
+  }
+});
+```
+
+The route arg takes `Input<string>`, which means it can take a string or an output. This creates a dependency internally. So the router will be deployed after the function has been. However, other components that are not dependent on this function can be deployed concurrently.
+
+You can read more about [Input and Output types on the Pulumi docs](https://www.pulumi.com/docs/concepts/inputs-outputs/).
+
+---
+
+### Apply 
+
+Since outputs are values that are yet to be resolved, you cannot use them in regular operations. You'll need to resolve them first.
+
+For example, let's take the function url from above. We cannot do the following.
+
+```ts title="sst.config.ts"
+const newUrl = myFunction.url + "/foo";
+```
+
+This is because the value of the output is not known at the time of this operation. We'll need to resolve it.
+
+The easiest way to work with an output is using `.apply`. It'll allow you to apply an operation on the output and return a new output.
+
+```ts title="sst.config.ts"
+const newUrl = myFunction.url.apply((value) => value + "/foo");
+```
+
+In this case, `newUrl` is also an `Output<string>`.
+
+---
+
+### Helpers
+
+To make it a little easier to work with outputs, we have the following global helper functions.
+
+---
+
+#### `$concat`
+
+This lets you do.
+
+```ts title="sst.config.ts"
+const newUrl = $concat(myFunction.url, "/foo");
+```
+
+Instead of the apply.
+
+```ts title="sst.config.ts"
+const newUrl = myFunction.url.apply((value) => value + "/foo");
+```
+
+Read more about [`$concat`](/docs/reference/global/#concat).
+
+---
+
+#### `$interpolate`
+
+This lets you do.
+
+```ts title="sst.config.ts"
+const newUrl = $interpolate`${myFunction.url}/foo`;
+```
+
+Instead of the apply.
+
+```ts title="sst.config.ts"
+const newUrl = myFunction.url.apply((value) => value + "/foo");
+```
+
+Read more about [`$interpolate`](/docs/reference/global/#interpolate).
+
+---
+
+#### `$jsonParse`
+
+This is for outputs that are JSON strings. So instead of doing this.
+
+```ts title="sst.config.ts"
+const policy = policyStr.apply((policy) =>
+  JSON.parse(policy)
+);
+```
+
+You can.
+
+```ts title="sst.config.ts"
+const policy = $jsonParse(policyStr);
+```
+
+Read more about [`$jsonParse`](/docs/reference/global/#jsonParse).
+
+---
+
+#### `$jsonStringify`
+
+Similarly, for outputs that are JSON objects. Instead of doing a stringify after an apply. 
+
+```ts title="sst.config.ts"
+const policy = policyObj.apply((policy) =>
+  JSON.stringify(policy)
+);
+```
+
+You can.
+
+```ts title="sst.config.ts"
+const policy = $jsonStringify(policyObj);
+```
+
+Read more about [`$jsonStringify`](/docs/reference/global/#jsonStringify).
+
+---
+
+#### `$resolve`
+
+And finally when you are working with a list of outputs and you want to resolve them all together.
+
+```ts title="sst.config.ts"
+$resolve([bucket.name, worker.url]).apply(([bucketName, workerUrl]) => {
+  console.log(`Bucket: ${bucketName}`);
+  console.log(`Worker: ${workerUrl}`);
+})
+```
+
+Read more about [`$resolve`](/docs/reference/global/#resolve).
+
+---
+
+## Versioning
+
+SST components evolve over time, sometimes introducing breaking changes. To maintain backwards compatibility, we implement a component versioning scheme.
+
+For example, we released a new version the [`Vpc`](/docs/component/aws/vpc) that does not create a NAT Gateway by default. To roll this out the previous version of the `Vpc` component was renamed to [`Vpc.v1`](/docs/component/aws/vpc-v1).
+
+Now if you were using the original `Vpc` component, update SST, and deploy; you'll get an error during the deploy saying that there's a new version of this component.
+
+This allows you to decide what you want to do with this component.
+
+---
+
+#### Continue with the old version
+
+If you prefer to continue using the older version of a component, you can rename it. 
+
+```diff title="sst.config.ts" lang="ts"
+- const vpc = new sst.aws.Vpc("MyVpc");
++ const vpc = new sst.aws.Vpc.v1("MyVpc");
+```
+
+Now if you deploy again, SST knows that you want to stick with the old version and it won't error.
+
+---
+
+#### Update to the latest version
+
+Instead, if you wanted to update to the latest version, you'll have to rename the component.
+
+```diff title="sst.config.ts" lang="ts"
+- const vpc = new sst.aws.Vpc("MyVpc");
++ const vpc = new sst.aws.Vpc("MyNewVpc");
+```
+
+Now if you redeploy, it'll remove the previously created component and recreate it with the new name and the latest version.
+
+This is because from SST's perspective it looks like the `MyVpc` component was removed and a new component called `MyNewVpc` was added.
+
+:::caution
+Removing and recreating components may cause temporary downtime in your app.
+:::
+
+Since these are being recreated you've to be aware that there might be a period of time when that resource is not around. This might cause some downtime, depending on the resource.

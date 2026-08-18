@@ -1,0 +1,127 @@
+/**
+ * Segments
+ */
+.sl-markdown-content > .tsdoc div.segment + :is(h2, h3, h4, h5, h6) {
+  margin-top: 3rem;
+}
+.sl-markdown-content > .tsdoc div.segment:not(:last-child):after {
+  content: '';
+  display: block;
+  height: 1px;
+  background: var(--divider-color);
+  margin-top: 3rem;
+}
+.sl-markdown-content > .tsdoc > h2 + h3 {
+  margin-top: 2.5rem;
+}
+
+/**
+ * Sections
+ */
+/* Parameters */
+.sl-markdown-content > .tsdoc section.parameters h4 + :not(a, strong, em, del, span, input, code, :where(.not-content *)) {
+  /* H4 Heading */
+  margin-top: 0.875rem;
+}
+.sl-markdown-content > .tsdoc section.parameters > section.inline + :not(a, strong, em, del, span, input, code, :where(.not-content *)) {
+  /* Inline Section Heading */
+  margin-top: 0.5625rem;
+}
+.sl-markdown-content >.tsdoc section.parameters :not(h4, a, strong, em, del, span, input, code) + :not(a, strong, em, del, span, input, code, ul, :where(.not-content *, .starlight-aside *)) {
+  margin-top: 0.5rem;
+}
+/* Signature */
+.sl-markdown-content > .tsdoc section.signature,
+.sl-markdown-content > .tsdoc section.signature + section {
+  margin-top: 2rem;
+}
+/* About */
+.sl-markdown-content > .tsdoc section.about :not(h1, h2, h3, h4, h5, h6) + :is(h4, h5, h6):not(:where(.not-content *)) {
+  margin-top: 2.5rem;
+}
+
+/**
+ * Headings
+ */
+.sl-markdown-content > .tsdoc section h4:not(:where(.not-content *)) {
+  font-size: var(--sl-text-h5); 
+}
+.sl-markdown-content > .tsdoc section.inline p:first-child strong:not(:where(.not-content *)) {
+  margin-right: var(--tsdoc-key-margin-right);
+  font-family: var(--__sl-font-headings);
+  letter-spacing: -0.5px;
+  font-weight: 500;
+  font-size: var(--sl-text-h5); 
+  color: var(--sl-color-white);
+}
+
+/**
+ * Lists
+ */
+.sl-markdown-content > .tsdoc section.parameters li > :last-child:not(li, ul, ol):not(a, strong, em, del, span, input, :where(.not-content *)) {
+  margin-bottom: 0.75rem;
+}
+.sl-markdown-content > .tsdoc section.parameters li > :last-child:is(.starlight-aside, .expressive-code) {
+  margin-bottom: 0.875rem;
+}
+
+/**
+ * Nested Title
+ */
+.sl-markdown-content > .tsdoc :is(h4, h5).nested span.parent {
+  font-weight: 400;
+  font-family: var(--__sl-font-mono);
+  color: var(--color-text-secondary);
+  font-size: var(--sl-text-code);
+}
+.sl-markdown-content > .tsdoc h4.nested span.parent {
+  font-size: calc(var(--sl-text-h4) - 0.0625rem);
+}
+
+/**
+ * Keys & Values
+ */
+.sl-markdown-content > .tsdoc section code.key:before,
+.sl-markdown-content > .tsdoc section code.type:before,
+.sl-markdown-content > .tsdoc section code.method:before,
+.sl-markdown-content > .tsdoc section code.symbol:before,
+.sl-markdown-content > .tsdoc section code.primitive:before,
+.sl-markdown-content > .tsdoc section code.key:after,
+.sl-markdown-content > .tsdoc section code.type:after,
+.sl-markdown-content > .tsdoc section code.method:after,
+.sl-markdown-content > .tsdoc section code.symbol:after,
+.sl-markdown-content > .tsdoc section code.primitive:after {
+  content: '';
+}
+.sl-markdown-content > .tsdoc section code.key {
+  margin-right: var(--tsdoc-key-margin-right);
+}
+.sl-markdown-content > .tsdoc section code.key,
+.sl-markdown-content > .tsdoc section code.type,
+.sl-markdown-content > .tsdoc section code.symbol,
+.sl-markdown-content > .tsdoc section code.primitive {
+  font-size: var(--sl-text-code);
+}
+.sl-markdown-content > .tsdoc section code.key,
+.sl-markdown-content > .tsdoc section code.primitive {
+  color: var(--color-text);
+}
+.sl-markdown-content > .tsdoc section a > code.key,
+.sl-markdown-content > .tsdoc section a > code.primitive {
+  color: var(--sl-color-text-accent);
+}
+.sl-markdown-content > .tsdoc section code.symbol {
+  color: var(--color-text-secondary);
+}
+.sl-markdown-content > .tsdoc section code.type,
+.sl-markdown-content > .tsdoc section code.symbol,
+.sl-markdown-content > .tsdoc section code.primitive {
+  font-weight: 400;
+}
+.sl-markdown-content > .tsdoc section code.primitive {
+  font-style: italic;
+}
+
+.sl-markdown-content > .tsdoc section span.dimmed {
+  color: var(--color-text-secondary);
+}

@@ -1,0 +1,15 @@
+---
+import Lander from './Lander.astro';
+import Default from '@astrojs/starlight/components/Hero.astro';
+
+const slug = Astro.url.pathname.replace(/^\//, "").replace(/\/$/, "");
+const isLander = slug === "";
+const isAboutPage = slug === "about";
+---
+
+{ isLander
+    ? <Lander />
+    : isAboutPage
+      ? null
+      : <Default {...Astro.props}><slot /></Default>
+}

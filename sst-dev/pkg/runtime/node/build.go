@@ -1,0 +1,498 @@
+package node
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+
+	esbuild "github.com/evanw/esbuild/pkg/api"
+	"github.com/sst/sst/v3/internal/fs"
+	"github.com/sst/sst/v3/pkg/js"
+	"github.com/sst/sst/v3/pkg/process"
+	"github.com/sst/sst/v3/pkg/runtime"
+	"gopkg.in/yaml.v3"
+)
+
+var forceExternal = []string{
+	"sharp", "pg-native",
+}
+
+var targetMap = map[string]esbuild.Target{
+	"nodejs24.x": esbuild.ES2024,
+	"nodejs22.x": esbuild.ES2023,
+	"nodejs20.x": esbuild.ES2023,
+	"nodejs18.x": esbuild.ES2022,
+	"nodejs16.x": esbuild.ES2021,
+	"nodejs14.x": esbuild.ES2020,
+	"nodejs12.x": esbuild.ES2019,
+}
+
+func (r *Runtime) Build(ctx context.Context, input *runtime.BuildInput) (*runtime.BuildOutput, error) {
+	log := slog.Default().With("service", "runtime.node").With("functionID", input.FunctionID)
+
+	r.concurrency.Acquire(ctx, 1)
+	defer r.concurrency.Release(1)
+	var properties NodeProperties
+	json.Unmarshal(input.Properties, &properties)
+
+	file, ok := r.getFile(input)
+	if !ok {
+		return nil, fmt.Errorf("Handler not found: %v", input.Handler)
+	}
+
+	isESM := true
+	extension := ".mjs"
+
+	if properties.Format == "cjs" {
+		isESM = false
+		extension = ".cjs"
+	}
+
+	handler := "bundle" + filepath.Ext(input.Handler)
+	target := filepath.Join(input.Out(), "bundle"+extension)
+	log.Info("loader info", "loader", properties.Loader)
+
+	loader := map[string]esbuild.Loader{}
+	for key, value := range properties.Loader {
+		mapped, ok := LoaderMap[value]
+		if !ok {
+			continue
+		}
+		loader[key] = mapped
+	}
+
+	plugins := []esbuild.Plugin{
+		{
+			Name: "sst-version-check",
+			Setup: func(build esbuild.PluginBuild) {
+				skipResolve := struct{}{}
+				build.OnResolve(esbuild.OnResolveOptions{Filter: `^sst$`}, func(args esbuild.OnResolveArgs) (esbuild.OnResolveResult, error) {
+					// avoid recursion
+					if args.PluginData == skipResolve {
+						return esbuild.OnResolveResult{}, nil
+					}
+					pkg := build.Resolve("sst", esbuild.ResolveOptions{
+						ResolveDir: args.ResolveDir,
+						Importer:   args.Importer,
+						Kind:       args.Kind,
+						With:       args.With,
+						PluginName: "sst-version-check",
+						PluginData: skipResolve,
+						Namespace:  args.Namespace,
+					})
+					if pkg.Path != "" {
+						path, err := fs.FindUp(pkg.Path, "package.json")
+						if err != nil {
+							return esbuild.OnResolveResult{}, err
+						}
+						var pkgjson js.PackageJson
+						data, err := os.Open(path)
+						if err != nil {
+							return esbuild.OnResolveResult{}, err
+						}
+						err = json.NewDecoder(data).Decode(&pkgjson)
+						if err != nil {
+							return esbuild.OnResolveResult{}, err
+						}
+						if r.version != "dev" && pkgjson.Version != r.version {
+							return esbuild.OnResolveResult{}, fmt.Errorf("The sst package your application is importing (%v) does not match the sst cli version (%v). Make sure the version of sst in package.json is correct across your entire repo.", pkgjson.Version, r.version)
+						}
+					}
+					return esbuild.OnResolveResult{Path: pkg.Path}, nil
+				})
+			},
+		},
+	}
+	if properties.Plugins != "" {
+		plugins = append(plugins, plugin(properties.Plugins))
+	}
+	external := append(forceExternal, resolveInstallPackages(properties.Install)...)
+	external = append(external, properties.ESBuild.External...)
+	slog.Debug("esbuild options",
+		"target", properties.ESBuild.Target,
+		"sourcemap", strings.Trim(string(properties.ESBuild.Sourcemap), "\""),
+		"keepNames", properties.ESBuild.KeepNames != nil && *properties.ESBuild.KeepNames,
+		"define", properties.ESBuild.Define,
+		"banner", properties.ESBuild.Banner,
+		"external", properties.ESBuild.External,
+		"mainFields", properties.ESBuild.MainFields,
+		"conditions", properties.ESBuild.Conditions,
+	)
+	options := esbuild.BuildOptions{
+		EntryPoints: []string{file},
+		Platform:    esbuild.PlatformNode,
+		External:    external,
+		Loader:      loader,
+		KeepNames:   properties.ESBuild.ResolveKeepNames(true),
+		Bundle:      true,
+		Splitting:   properties.Splitting,
+		Metafile:    true,
+		Outfile:     target,
+		Plugins:     plugins,
+		Sourcemap:   properties.ESBuild.ResolveSourcemap(esbuild.SourceMapLinked),
+		Write:       true,
+		Format:      esbuild.FormatESModule,
+		Target:      properties.ESBuild.ResolveTarget(targetMap[input.Runtime]),
+		MainFields:  properties.ESBuild.ResolveMainFields([]string{"module", "main"}),
+		Conditions:  properties.ESBuild.ResolveConditions(nil),
+		Banner: map[string]string{
+			"js": strings.Join([]string{
+				`import { createRequire as topLevelCreateRequire } from 'module';`,
+				`const require = topLevelCreateRequire(import.meta.url);`,
+				`import { fileURLToPath as topLevelFileUrlToPath, URL as topLevelURL } from "url"`,
+				`const __filename = topLevelFileUrlToPath(import.meta.url)`,
+				`const __dirname = topLevelFileUrlToPath(new topLevelURL(".", import.meta.url))`,
+				properties.Banner,
+			}, "\n"),
+		},
+		NodePaths: properties.ESBuild.NodePaths,
+		Define:    properties.ESBuild.Define,
+	}
+
+	if !isESM {
+		options.Format = esbuild.FormatCommonJS
+		options.Banner["js"] = properties.Banner
+		options.MainFields = properties.ESBuild.ResolveMainFields([]string{"main"})
+	}
+
+	if properties.Splitting {
+		options.Outdir = filepath.Dir(target)
+		options.OutExtension = map[string]string{
+			".js": ".mjs",
+		}
+		options.Outfile = ""
+		options.EntryNames = "bundle"
+	}
+
+	if !input.Dev {
+		if properties.Minify {
+			options.MinifyWhitespace = properties.Minify
+			options.MinifySyntax = properties.Minify
+			options.MinifyIdentifiers = properties.Minify
+		}
+		if properties.SourceMap != nil && *properties.SourceMap == false {
+			options.Sourcemap = esbuild.SourceMapLinked
+		}
+	}
+
+	var result esbuild.BuildResult
+
+	slog.Debug("esbuild resolved options",
+		"target", options.Target,
+		"sourcemap", options.Sourcemap,
+		"keepNames", options.KeepNames,
+		"define", options.Define,
+		"mainFields", options.MainFields,
+		"conditions", options.Conditions,
+	)
+	log.Info("running esbuild")
+	if !input.Dev {
+		context, _ := esbuild.Context(options)
+		result = context.Rebuild()
+		context.Dispose()
+	}
+
+	if input.Dev {
+		match, ok := r.contexts.Load(input.FunctionID)
+		if !ok {
+			match, _ = esbuild.Context(options)
+			r.contexts.Store(input.FunctionID, match)
+		}
+		result = match.(esbuild.BuildContext).Rebuild()
+		r.results.Store(input.FunctionID, result)
+	}
+	log.Info("esbuild finished")
+
+	errors := []string{}
+	for _, error := range result.Errors {
+		text := error.Text
+		if error.Location != nil {
+			text = text + " " + error.Location.File + ":" + fmt.Sprint(error.Location.Line) + ":" + fmt.Sprint(error.Location.Column)
+		}
+		errors = append(errors, text)
+	}
+	for _, error := range result.Errors {
+		log.Error("esbuild error", "error", error)
+	}
+	for _, warning := range result.Warnings {
+		log.Error("esbuild error", "error", warning)
+	}
+
+	if input.Dev {
+		nodeModules, err := fs.FindUp(file, "node_modules")
+		if err == nil {
+			os.Symlink(nodeModules, filepath.Join(input.Out(), "node_modules"))
+		}
+	}
+
+	sourcemaps := []string{}
+	if !input.Dev {
+		if properties.SourceMap == nil {
+			for _, file := range result.OutputFiles {
+				if strings.HasSuffix(file.Path, ".map") {
+					sourcemaps = append(sourcemaps, file.Path)
+				}
+			}
+		}
+		var metafile js.Metafile
+		json.Unmarshal([]byte(result.Metafile), &metafile)
+
+		installPackages := resolveInstallPackages(properties.Install)
+		for _, pkg := range forceExternal {
+			if slices.Contains(properties.ESBuild.External, pkg) {
+				continue
+			}
+			for _, input := range metafile.Inputs {
+				for _, imp := range input.Imports {
+					if imp.Kind == "external" && imp.Path == pkg {
+						installPackages = append(installPackages, pkg)
+					}
+				}
+			}
+		}
+
+		if len(installPackages) > 0 {
+			log.Info("installing", "packages", installPackages)
+			src, err := fs.FindUp(filepath.Dir(file), "package.json")
+			if err != nil {
+				return nil, err
+			}
+			file, err := os.Open(src)
+			if err != nil {
+				return nil, err
+			}
+			defer file.Close()
+			var parsed js.PackageJson
+			err = json.NewDecoder(file).Decode(&parsed)
+			if err != nil {
+				return nil, err
+			}
+			dependencies := map[string]string{}
+			for _, pkg := range installPackages {
+				version, err := resolveInstallVersion(pkg, properties.Install, filepath.Dir(src), parsed)
+				if err != nil {
+					return nil, err
+				}
+				dependencies[pkg] = version
+			}
+			outPkg := filepath.Join(input.Out(), "package.json")
+			outFile, err := os.Create(outPkg)
+			if err != nil {
+				return nil, err
+			}
+			json.NewEncoder(outFile).Encode(map[string]interface{}{
+				"dependencies": dependencies,
+			})
+			outFile.Close()
+
+			cmd := []string{
+				"install",
+				// npm will refuse to install packages if platform does not match
+				"--force",
+				"--platform=linux",
+				"--os=linux",
+				"--arch=x64",
+				"--cpu=x64",
+			}
+			if properties.Architecture == "arm64" {
+				cmd[4] = "--arch=arm64"
+				cmd[5] = "--cpu=arm64"
+			}
+			if slices.Contains(installPackages, "sharp") {
+				cmd = append(cmd, "--libc=glibc")
+			}
+			proc := process.Command("npm", cmd...)
+			proc.Dir = input.Out()
+			log.Info("running npm", "cmd", cmd)
+			output, err := proc.CombinedOutput()
+			slog.Info("npm output", "output", string(output))
+			if err != nil {
+				return nil, fmt.Errorf("failed to run npm install: %w", err)
+			}
+			log.Info("done installing", "packages", installPackages)
+		}
+	}
+
+	return &runtime.BuildOutput{
+		Handler:    handler,
+		Errors:     errors,
+		Sourcemaps: sourcemaps,
+	}, nil
+}
+
+type catalogSource struct {
+	Catalog  map[string]string            `json:"catalog" yaml:"catalog"`
+	Catalogs map[string]map[string]string `json:"catalogs" yaml:"catalogs"`
+}
+
+type bunPackageJSON struct {
+	Catalog    map[string]string            `json:"catalog"`
+	Catalogs   map[string]map[string]string `json:"catalogs"`
+	Workspaces json.RawMessage              `json:"workspaces"`
+}
+
+type bunWorkspaces struct {
+	Catalog  map[string]string            `json:"catalog"`
+	Catalogs map[string]map[string]string `json:"catalogs"`
+}
+
+func resolveInstallPackages(install map[string]string) []string {
+	result := make([]string, 0, len(install))
+	for pkg := range install {
+		result = append(result, pkg)
+	}
+	return result
+}
+
+func resolveInstallVersion(pkg string, install map[string]string, dir string, packageJSON js.PackageJson) (string, error) {
+	version := install[pkg]
+	if version == "" || version == "*" {
+		version = packageJSON.Dependencies[pkg]
+	}
+	if version == "" {
+		return "*", nil
+	}
+	if strings.HasPrefix(version, "catalog:") {
+		var err error
+		version, err = resolveCatalogVersion(dir, pkg, version)
+		if err != nil {
+			return "", err
+		}
+	}
+	for _, prefix := range []string{"catalog:", "workspace:", "file:", "link:", "portal:", "patch:"} {
+		if strings.HasPrefix(version, prefix) {
+			return "", fmt.Errorf("could not determine an npm-compatible version for %q in nodejs.install: found %q using %q; pin the version explicitly", pkg, version, prefix)
+		}
+	}
+	return version, nil
+}
+
+func resolveCatalogVersion(dir string, pkg string, version string) (string, error) {
+	workspacePath, err := fs.FindUp(dir, "pnpm-workspace.yaml")
+	if err == nil {
+		return resolvePnpmCatalogVersion(workspacePath, pkg, version)
+	}
+	resolved, found, err := resolveBunCatalogVersion(dir, pkg, version)
+	if err != nil {
+		return "", err
+	}
+	if found {
+		return resolved, nil
+	}
+	return "", fmt.Errorf("could not determine an npm-compatible version for %q in nodejs.install: found %q but pnpm-workspace.yaml was not found and no Bun catalog was found in an ancestor package.json; pin the version explicitly", pkg, version)
+}
+
+func resolvePnpmCatalogVersion(workspacePath string, pkg string, version string) (string, error) {
+	data, err := os.ReadFile(workspacePath)
+	if err != nil {
+		return "", err
+	}
+	var workspace catalogSource
+	if err := yaml.Unmarshal(data, &workspace); err != nil {
+		return "", err
+	}
+	resolved, ok := resolveCatalogEntry(pkg, version, workspace)
+	if !ok {
+		return "", fmt.Errorf("could not determine an npm-compatible version for %q in nodejs.install: found %q but no matching catalog entry exists in pnpm-workspace.yaml; pin the version explicitly", pkg, version)
+	}
+	return resolved, nil
+}
+
+func resolveBunCatalogVersion(dir string, pkg string, version string) (string, bool, error) {
+	currentDir := dir
+	for {
+		packagePath := filepath.Join(currentDir, "package.json")
+		data, err := os.ReadFile(packagePath)
+		if err == nil {
+			source, found, err := parseBunCatalogSource(data)
+			if err != nil {
+				return "", false, err
+			}
+			if found {
+				resolved, ok := resolveCatalogEntry(pkg, version, source)
+				if !ok {
+					return "", true, fmt.Errorf("could not determine an npm-compatible version for %q in nodejs.install: found %q but no matching catalog entry exists in %s; pin the version explicitly", pkg, version, packagePath)
+				}
+				return resolved, true, nil
+			}
+		} else if !os.IsNotExist(err) {
+			return "", false, err
+		}
+
+		if currentDir == filepath.Dir(currentDir) {
+			break
+		}
+		currentDir = filepath.Dir(currentDir)
+	}
+	return "", false, nil
+}
+
+func parseBunCatalogSource(data []byte) (catalogSource, bool, error) {
+	var manifest bunPackageJSON
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return catalogSource{}, false, err
+	}
+	source := catalogSource{
+		Catalog:  manifest.Catalog,
+		Catalogs: manifest.Catalogs,
+	}
+	workspaceSource, found, err := parseBunWorkspacesCatalogSource(manifest.Workspaces)
+	if err != nil {
+		return catalogSource{}, false, err
+	}
+	if found {
+		if workspaceSource.Catalog != nil {
+			source.Catalog = workspaceSource.Catalog
+		}
+		if workspaceSource.Catalogs != nil {
+			if source.Catalogs == nil {
+				source.Catalogs = map[string]map[string]string{}
+			}
+			for name, catalog := range workspaceSource.Catalogs {
+				source.Catalogs[name] = catalog
+			}
+		}
+	}
+	if source.Catalog == nil && len(source.Catalogs) == 0 {
+		return catalogSource{}, false, nil
+	}
+	return source, true, nil
+}
+
+func parseBunWorkspacesCatalogSource(raw json.RawMessage) (catalogSource, bool, error) {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed[0] != '{' {
+		return catalogSource{}, false, nil
+	}
+	var workspaces bunWorkspaces
+	if err := json.Unmarshal(raw, &workspaces); err != nil {
+		return catalogSource{}, false, err
+	}
+	if workspaces.Catalog == nil && len(workspaces.Catalogs) == 0 {
+		return catalogSource{}, false, nil
+	}
+	return catalogSource{
+		Catalog:  workspaces.Catalog,
+		Catalogs: workspaces.Catalogs,
+	}, true, nil
+}
+
+func resolveCatalogEntry(pkg string, version string, source catalogSource) (string, bool) {
+	catalogName := strings.TrimSpace(strings.TrimPrefix(version, "catalog:"))
+	var catalog map[string]string
+	if catalogName == "" || catalogName == "default" {
+		catalog = source.Catalog
+		if catalog == nil {
+			catalog = source.Catalogs["default"]
+		}
+	} else {
+		catalog = source.Catalogs[catalogName]
+	}
+	resolved := catalog[pkg]
+	return resolved, resolved != ""
+}

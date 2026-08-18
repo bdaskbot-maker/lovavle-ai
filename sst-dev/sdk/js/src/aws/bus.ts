@@ -1,0 +1,89 @@
+import { awsFetch, type AwsOptions } from "./client.js";
+import { Resource } from "../resource/index.js";
+import { event } from "../event/index.js";
+import { EventBridgeEvent, EventBridgeHandler, Context } from "aws-lambda";
+
+export namespace bus {
+  export type Name = Extract<typeof Resource, { type: "sst.aws.Bus" }>["name"];
+
+  export function subscriber<Events extends event.Definition>(
+    _events: Events | Events[],
+    cb: (
+      input: {
+        [K in Events["type"]]: Extract<Events, { type: K }>["$payload"];
+      }[Events["type"]],
+      raw: EventBridgeEvent<string, any>,
+      context: Context
+    ) => Promise<void>,
+  ): EventBridgeHandler<string, any, void> {
+    return async function (event, context) {
+      const payload = {
+        type: event["detail-type"],
+        properties: event.detail.properties,
+        metadata: event.detail.metadata,
+      };
+      return cb(payload, event, context);
+    };
+  }
+
+  /** @deprecated
+   * use bus.subscriber instead
+   * */
+  export const handler = subscriber;
+
+  export async function publish<Definition extends event.Definition = any>(
+    name: string | { name: string },
+    def: Definition | string,
+    properties: Definition["$input"],
+    options?: {
+      metadata?: Definition["$metadata"];
+      aws?: AwsOptions;
+    },
+  ): Promise<any> {
+    const evt =
+      typeof def === "string"
+        ? {
+            type: def,
+            properties,
+            metadata: options?.metadata || {},
+          }
+        : await def.create(properties, options?.metadata);
+    const res = await awsFetch(
+      "events",
+      "/",
+      {
+        method: "POST",
+        headers: {
+          "X-Amz-Target": "AWSEvents.PutEvents",
+          "Content-Type": "application/x-amz-json-1.1",
+        },
+        body: JSON.stringify({
+          Entries: [
+            {
+              Source: [Resource.App.name, Resource.App.stage].join("."),
+              DetailType: evt.type,
+              Detail: JSON.stringify({
+                metadata: evt.metadata,
+                properties: evt.properties,
+              }),
+              EventBusName: typeof name === "string" ? name : name.name,
+            },
+          ],
+        }),
+      },
+      options,
+    )
+      .catch((e) => {
+        if (e instanceof Error) console.log("cause", e.cause);
+        throw e;
+      });
+    if (!res.ok) throw new PublishError(res);
+    return res.json();
+  }
+
+  export class PublishError extends Error {
+    constructor(public readonly response: Response) {
+      super("Failed to publish event to bus");
+    }
+  }
+}

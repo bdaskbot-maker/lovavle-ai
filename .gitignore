@@ -13,3 +13,8 @@ __v0_jsx-dev-runtime.ts
 node_modules
 .next/
 .DS_Store
+archive-merge/
+sst-dev.zip
+sst-dev/node_modules/
+sst-dev/www/dist/
+sst-dev/www/cli-doc.json
