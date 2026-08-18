@@ -18,3 +18,4 @@ sst-dev.zip
 sst-dev/node_modules/
 sst-dev/www/dist/
 sst-dev/www/cli-doc.json
+.vercel
